@@ -1,0 +1,12 @@
+== A
+4264 page reclaims  1634121065 instructions retired  1503837448 cycles elapsed  
+4263 page reclaims  1605116067 instructions retired  1416788724 cycles elapsed  
+4263 page reclaims  1604088283 instructions retired  1352876049 cycles elapsed  
+== B
+4302 page reclaims  1813301756 instructions retired  1183233162 cycles elapsed  
+4305 page reclaims  1825669823 instructions retired  1548026888 cycles elapsed  
+4293 page reclaims  1808146316 instructions retired  1293796611 cycles elapsed  
+== C
+2760 page reclaims  633136616 instructions retired  265464827 cycles elapsed  
+2762 page reclaims  627676926 instructions retired  240669056 cycles elapsed  
+2761 page reclaims  628440547 instructions retired  234720097 cycles elapsed  
