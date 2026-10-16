@@ -1,4 +1,4 @@
-// one binary: --impl A|B|C picks the book, everything else is shared
+// one binary: --impl A|B|C to benchmark, --verify to run all three in lockstep
 #include "order_book_map.hpp"
 #include "order_book_heap.hpp"
 #include "order_book_array.hpp"
@@ -189,14 +189,117 @@ static int bench(char impl, const Workload& w, uint32_t seed, int runs, bool jso
     return 0;
 }
 
+// ---------- verify: run A, B, C side by side ----------
+
+static bool same_bbo(const BBO& x, const BBO& y) {
+    if (x.has_bid != y.has_bid || x.has_ask != y.has_ask) return false;
+    if (x.has_bid && (to_tick(x.bid_price) != to_tick(y.bid_price) || x.bid_qty != y.bid_qty)) return false;
+    if (x.has_ask && (to_tick(x.ask_price) != to_tick(y.ask_price) || x.ask_qty != y.ask_qty)) return false;
+    return true;
+}
+
+static bool same_levels(const std::vector<Level>& x, const std::vector<Level>& y) {
+    if (x.size() != y.size()) return false;
+    for (size_t i = 0; i < x.size(); ++i)
+        if (to_tick(x[i].price) != to_tick(y[i].price) || x[i].qty != y[i].qty) return false;
+    return true;
+}
+
+static void dump_bbo(const char* tag, const BBO& b) {
+    fprintf(stderr, "  %s: bid %s %.2f x %ld | ask %s %.2f x %ld\n", tag,
+            b.has_bid ? "Y" : "N", b.bid_price, b.bid_qty, b.has_ask ? "Y" : "N", b.ask_price, b.ask_qty);
+}
+
+static void dump_op(size_t i, const Op& op) {
+    const char* t = op.type == OpType::Add ? "ADD" : op.type == OpType::Cancel ? "CANCEL" : "BBO";
+    fprintf(stderr, "mismatch at op %zu: %s id=%llu side=%s tick=%d qty=%d\n", i, t,
+            (unsigned long long)op.id, op.side == Side::Buy ? "B" : "S", op.tick, op.qty);
+}
+
+static int verify(const Workload& w) {
+    printf("Running correctness test...\n");
+    OrderBookMap a;
+    OrderBookHeap b;
+    OrderBookArray c;
+    bool okB = true, okC = true;
+
+    for (size_t i = 0; i < w.ops.size() && okB && okC; ++i) {
+        const Op& op = w.ops[i];
+        if (op.type == OpType::Add) {
+            double p = to_price(op.tick);
+            bool ra = a.add_order(op.id, op.side, p, op.qty);
+            bool rb = b.add_order(op.id, op.side, p, op.qty);
+            bool rc = c.add_order(op.id, op.side, p, op.qty);
+            if (ra != rb || ra != rc) {
+                dump_op(i, op);
+                fprintf(stderr, "  add returned A=%d B=%d C=%d\n", ra, rb, rc);
+                okB = ra == rb; okC = ra == rc;
+            }
+        } else if (op.type == OpType::Cancel) {
+            bool ra = a.cancel_order(op.id);
+            bool rb = b.cancel_order(op.id);
+            bool rc = c.cancel_order(op.id);
+            if (ra != rb || ra != rc) {
+                dump_op(i, op);
+                fprintf(stderr, "  cancel returned A=%d B=%d C=%d\n", ra, rb, rc);
+                okB = ra == rb; okC = ra == rc;
+            }
+        }
+        BBO xa = a.get_bbo(), xb = b.get_bbo(), xc = c.get_bbo();
+        if (!same_bbo(xa, xb) || !same_bbo(xa, xc)) {
+            dump_op(i, op);
+            dump_bbo("A", xa); dump_bbo("B", xb); dump_bbo("C", xc);
+            okB = same_bbo(xa, xb); okC = same_bbo(xa, xc);
+        }
+        if ((i + 1) % 100 == 0) {
+            auto ba = a.get_bids(10), bb = b.get_bids(10), bc = c.get_bids(10);
+            auto sa = a.get_asks(10), sb = b.get_asks(10), sc = c.get_asks(10);
+            bool bidsB = same_levels(ba, bb), bidsC = same_levels(ba, bc);
+            bool asksB = same_levels(sa, sb), asksC = same_levels(sa, sc);
+            if (!bidsB || !bidsC || !asksB || !asksC) {
+                dump_op(i, op);
+                fprintf(stderr, "  depth(10) differs: bids B=%d C=%d asks B=%d C=%d (sizes A %zu/%zu B %zu/%zu C %zu/%zu)\n",
+                        bidsB, bidsC, asksB, asksC, ba.size(), sa.size(), bb.size(), sb.size(), bc.size(), sc.size());
+                okB = bidsB && asksB; okC = bidsC && asksC;
+            }
+        }
+    }
+
+    if (okB && okC) {
+        // full depth at the end
+        auto ba = a.get_bids(LEVELS_PER_SIDE), sa = a.get_asks(LEVELS_PER_SIDE);
+        okB = same_levels(ba, b.get_bids(LEVELS_PER_SIDE)) && same_levels(sa, b.get_asks(LEVELS_PER_SIDE));
+        okC = same_levels(ba, c.get_bids(LEVELS_PER_SIDE)) && same_levels(sa, c.get_asks(LEVELS_PER_SIDE));
+        if (!okB || !okC) fprintf(stderr, "full depth differs at the end: B=%d C=%d\n", okB, okC);
+    }
+
+    // and the bench checksums have to agree too
+    uint64_t csA = run<OrderBookMap>(w).checksum;
+    uint64_t csB = run<OrderBookHeap>(w).checksum;
+    uint64_t csC = run<OrderBookArray>(w).checksum;
+    if (csB != csA) { okB = false; fprintf(stderr, "checksum B 0x%llx != A 0x%llx\n", (unsigned long long)csB, (unsigned long long)csA); }
+    if (csC != csA) { okC = false; fprintf(stderr, "checksum C 0x%llx != A 0x%llx\n", (unsigned long long)csC, (unsigned long long)csA); }
+
+    printf("Implementation A: PASS\n");  // A is the reference, the other two are checked against it
+    printf("Implementation B: %s\n", okB ? "PASS" : "FAIL");
+    printf("Implementation C: %s\n", okC ? "PASS" : "FAIL");
+    if (okB && okC) {
+        printf("All implementations produce identical results.\n");
+        printf("Checksum: 0x%016llx\n", (unsigned long long)csA);
+        return 0;
+    }
+    return 1;
+}
+
 static void usage(const char* me) {
     fprintf(stderr,
-            "usage: %s --impl A|B|C [--runs 5] [--ops 1000000] [--seed 42] [--json] [--notime]\n", me);
+            "usage: %s --impl A|B|C [--runs 5] [--ops 1000000] [--seed 42] [--json] [--notime]\n"
+            "       %s --verify [--ops N] [--seed S]\n", me, me);
 }
 
 int main(int argc, char** argv) {
     char impl = 0;
-    bool json = false, timed = true;
+    bool do_verify = false, json = false, timed = true;
     int runs = 5;
     size_t ops = 1000000;
     uint32_t seed = 42;
@@ -210,12 +313,14 @@ int main(int argc, char** argv) {
         else if (a == "--seed" && has_next) seed = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
         else if (a == "--json") json = true;
         else if (a == "--notime") timed = false;  // perf runs, skip per op clocks
+        else if (a == "--verify") do_verify = true;
         else { usage(argv[0]); return 2; }
     }
-    if (impl != 'A' && impl != 'B' && impl != 'C') { usage(argv[0]); return 2; }
+    if (!do_verify && impl != 'A' && impl != 'B' && impl != 'C') { usage(argv[0]); return 2; }
     if (runs < 1 || ops == 0) { usage(argv[0]); return 2; }
 
     Workload w = gen_workload(ops, seed);  // everything pre generated, nothing random inside the timed loop
+    if (do_verify) return verify(w);
     switch (impl) {
     case 'A': return bench<OrderBookMap>(impl, w, seed, runs, json, timed);
     case 'B': return bench<OrderBookHeap>(impl, w, seed, runs, json, timed);
