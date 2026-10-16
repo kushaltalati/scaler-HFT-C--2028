@@ -1,6 +1,7 @@
-// hand written edge cases, run on every book
+// hand written edge cases, run on all three books
 #include "../order_book_map.hpp"
 #include "../order_book_heap.hpp"
+#include "../order_book_array.hpp"
 #include <cstdio>
 
 static int fails = 0, checks = 0;
@@ -145,12 +146,26 @@ static void edge_suite() {
     }
 }
 
+// only C has the slab / overflow split
+static void array_overflow() {
+    OrderBookArray b(4);  // slab holds ids 0..3, everything else goes to the hash map
+    CHECK(b.add_order(2, Side::Buy, 70.00, 5));
+    CHECK(b.add_order(1000, Side::Buy, 71.00, 6));
+    CHECK(!b.add_order(1000, Side::Buy, 71.00, 6));
+    CHECK(to_tick(b.get_bbo().bid_price) == 7100);
+    CHECK(b.cancel_order(1000));
+    CHECK(!b.cancel_order(1000));
+    CHECK(to_tick(b.get_bbo().bid_price) == 7000);
+    CHECK(b.cancel_order(2) && !b.get_bbo().has_bid);
+}
+
 int main() {
-    const char* names[2] = {"A", "B"};
-    for (int i = 0; i < 2; ++i) {
+    const char* names[3] = {"A", "B", "C"};
+    for (int i = 0; i < 3; ++i) {
         int before = fails, c0 = checks;
         if (i == 0) edge_suite<OrderBookMap>();
         if (i == 1) edge_suite<OrderBookHeap>();
+        if (i == 2) { edge_suite<OrderBookArray>(); array_overflow(); }
         printf("Edge cases %s: %s (%d checks)\n", names[i], fails == before ? "PASS" : "FAIL", checks - c0);
     }
     return fails ? 1 : 0;
