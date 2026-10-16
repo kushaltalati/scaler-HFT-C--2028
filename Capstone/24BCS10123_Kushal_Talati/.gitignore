@@ -1,0 +1,9 @@
+bench
+edge_tests
+bench_asan
+edge_tests_asan
+*.o
+*.dSYM/
+perf/*.data
+perf/*.data.old
+perf/*.log
